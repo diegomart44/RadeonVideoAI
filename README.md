@@ -1,14 +1,18 @@
 # RadeonVideoAI
 
 Suite de escritorio para Windows que reescala vídeo y mejora su calidad con IA
-(elimina ruido, reconstruye detalle y nitidez), pensada para funcionar bien en
-hardware AMD de gama media: **AMD Ryzen 5 2600 + Radeon RX 9060 XT (16 GB)**.
+(elimina ruido, reconstruye detalle y nitidez). Desarrollada y probada en
+hardware AMD de gama media (**AMD Ryzen 5 2600 + Radeon RX 9060 XT, 16 GB**),
+pero la detección de hardware es automática y no depende de una marca: usa
+DirectML (DirectX 12), que acelera por GPU en **NVIDIA, AMD e Intel** por
+igual sin ninguna configuración manual — ver [Detección automática de
+hardware](#detección-automática-de-hardware).
 
 No es un clon binario de Topaz Video AI (sus modelos son propietarios), pero
 cubre el mismo flujo funcional — reescalado por IA + desruido + realce de
 detalle, con interfaz gráfica, vista previa lado a lado y exportación con
-codificación por hardware AMD — usando modelos de IA reales y con pesos
-entrenados públicamente disponibles.
+codificación acelerada por hardware — usando modelos de IA reales y con
+pesos entrenados públicamente disponibles.
 
 ## Cómo funciona la IA
 
@@ -50,22 +54,43 @@ solos. Para añadir un nuevo checkpoint RRDBNet: descarga el `.pth` a
 apuntando a ese archivo (mismos `arch_kwargs` que `x4plus`, ajustando
 `num_block` si corresponde), y aparecerá disponible en el desplegable.
 
-### Inferencia en la GPU AMD
+### Detección automática de hardware
 
-El cómputo de la red neuronal corre por **ONNX Runtime con el proveedor
-DirectML** (`onnxruntime-directml`), que usa DirectX 12 y funciona con
-cualquier GPU AMD moderna (incluida la RX 9060 XT/RDNA4) a través del driver
-Adrenalin estándar — sin ROCm ni CUDA. Se descartó `torch-directml` porque
-Microsoft lo tiene en mantenimiento y ya no publica builds compatibles con
-versiones actuales de PyTorch/Python; ONNX Runtime + DirectML es la ruta
-vigente y soportada en 2026 para inferencia GPU en Windows.
+La app detecta el hardware al arrancar (`core/amd_backend.py`) y no requiere
+configuración manual — ni elegir "modo NVIDIA" o "modo AMD" en ningún lado:
+
+- **GPU**: se identifica el fabricante (NVIDIA, AMD o Intel) vía WMI, y el
+  cómputo de la red neuronal corre por **ONNX Runtime con el proveedor
+  DirectML** (`onnxruntime-directml`). A diferencia de CUDA o ROCm, DirectML
+  no es específico de un fabricante — es una capa de cómputo de DirectX 12
+  nativa de Windows — así que **el mismo código acelera por GPU en NVIDIA,
+  AMD e Intel Arc por igual**, con cualquier driver moderno con soporte
+  DirectX 12, sin instalar CUDA ni ROCm.
+- **VRAM**: se lee el tamaño real desde el registro del driver (WMI trunca a
+  32 bits y da valores incorrectos en tarjetas de 4GB+); en NVIDIA se usa
+  además `nvidia-smi` como confirmación. Si no se puede determinar con
+  certeza, se asume un valor conservador en vez de adivinar una tarjeta
+  específica — el sistema de tiling degrada el tamaño de parche
+  automáticamente si hace falta, así que subestimar VRAM es más seguro que
+  sobrestimarla.
+- **CPU**: si no hay ninguna GPU con DirectX 12 disponible, la app usa
+  automáticamente todos los núcleos físicos de la CPU detectada como
+  respaldo (más lento, pero funcional, sea Intel o AMD).
 
 PyTorch solo se usa en CPU, una vez por modelo, para cargar el checkpoint y
 exportarlo a un grafo ONNX cacheado (`models/weights/onnx_cache/`). Todo el
-procesamiento por fotograma ocurre dentro de la sesión de ONNX Runtime.
+procesamiento por fotograma ocurre dentro de la sesión de ONNX Runtime. Se
+descartó `torch-directml` porque Microsoft lo tiene en mantenimiento y ya no
+publica builds compatibles con versiones actuales de PyTorch/Python; ONNX
+Runtime + DirectML es la ruta vigente y soportada en 2026 para inferencia
+GPU en Windows.
 
-Si no hay una GPU DirectX 12 disponible, la app usa automáticamente todos los
-núcleos físicos del Ryzen como respaldo (más lento, pero funcional).
+**Límite honesto — codificación de salida:** la aceleración por hardware del
+*encoder* de salida (`hevc_amf`/`h264_amf`, sección siguiente) sí es
+específica de AMD (AMF). En NVIDIA/Intel esto cae automáticamente a
+`libx265`/`libx264` por software — la IA sigue corriendo por GPU igual, pero
+la etapa final de exportar el video no usa el encoder de hardware de esas
+tarjetas (NVENC/QuickSync no están implementados todavía).
 
 ### Pipeline de vídeo
 
@@ -74,8 +99,10 @@ núcleos físicos del Ryzen como respaldo (más lento, pero funcional).
 - División en parches (tiling) con **fusión por coseno** (cosine feathering)
   para reescalar imágenes grandes sin costuras ni artefactos en los bordes,
   con degradación automática del tamaño de parche si la memoria se satura.
-- Codificación de salida acelerada por hardware AMD (`hevc_amf` / `h264_amf`),
-  con fallback a `libx265`/`libx264` si el sistema no expone AMF.
+- Codificación de salida acelerada por hardware AMD (`hevc_amf` / `h264_amf`)
+  cuando hay una GPU AMD con AMF disponible, con fallback automático a
+  `libx265`/`libx264` por software en cualquier otro caso (incluyendo
+  NVIDIA/Intel, donde la IA sigue corriendo por GPU vía DirectML igual).
 - El audio original se preserva intacto (remux sin recodificar).
 
 ## Pestaña "Generar" (IA Generativa)
@@ -110,9 +137,11 @@ artefactos de compresión reales. Trata "Generar" como experimental.
 ## Requisitos
 
 - Windows 10/11 64-bit.
-- AMD Ryzen 5 2600 (o similar) + Radeon RX 9060 XT — u otra GPU con soporte
-  DirectX 12.
-- Driver AMD Adrenalin reciente (con soporte DirectML/DirectX 12 para RDNA4).
+- Cualquier GPU con soporte DirectX 12 (NVIDIA, AMD o Intel Arc) — probado
+  principalmente en AMD Ryzen 5 2600 + Radeon RX 9060 XT, pero la detección
+  de hardware es automática (ver arriba). Sin GPU compatible, funciona igual
+  por CPU multi-núcleo, más lento.
+- Driver de GPU reciente con soporte DirectX 12/DirectML.
 - Python 3.10+ si se ejecuta desde código fuente (no hace falta si usas el
   ejecutable portable compilado).
 - Conexión a internet la primera vez que se usa cada modelo de IA (descarga

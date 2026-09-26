@@ -1,9 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
 PyInstaller Spec File for RadeonVideoAI Portable Suite.
-Target: Windows 11 64-bit with AMD Radeon (ONNX Runtime DirectML) & AMD Ryzen.
-Bundles PyQt6, PyTorch (CPU, used only to load/export AI weights), ONNX
-Runtime DirectML, and standalone FFmpeg binaries.
+Target: Windows 10/11 64-bit with any DirectX 12 GPU (NVIDIA/AMD/Intel, via
+ONNX Runtime DirectML) and any CPU. Bundles PyQt6, PyTorch (CPU, used only
+to load/export AI weights), ONNX Runtime DirectML, and standalone FFmpeg
+binaries.
 """
 
 import os

@@ -1,10 +1,10 @@
 @echo off
 setlocal enabledelayedexpansion
-title RadeonVideoAI - Suite de Restauración y Reescalado con IA (AMD Radeon)
+title RadeonVideoAI - Suite de Restauración y Reescalado con IA
 
 echo ======================================================================
-echo    RadeonVideoAI Suite - Motor Generativo para Windows y AMD Radeon
-echo    Target: AMD Radeon RX 9060 XT (DirectML) / Ryzen CPU
+echo    RadeonVideoAI Suite - Motor Generativo para Windows
+echo    GPU: cualquier NVIDIA/AMD/Intel con DirectX 12 (DirectML) / CPU
 echo ======================================================================
 echo.
 
