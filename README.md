@@ -4,8 +4,7 @@ Suite de escritorio para Windows que reescala vídeo y mejora su calidad con IA
 (elimina ruido, reconstruye detalle y nitidez), pensada para funcionar bien en
 hardware AMD de gama media: **AMD Ryzen 5 2600 + Radeon RX 9060 XT (16 GB)**.
 
-No es un clon binario de Topaz Video AI (sus modelos son propietarios), pero
-cubre el mismo flujo funcional — reescalado por IA + desruido + realce de
+Cubre el flujo funcional — reescalado por IA + desruido + realce de
 detalle, con interfaz gráfica, vista previa lado a lado y exportación con
 codificación por hardware AMD — usando modelos de IA reales y con pesos
 entrenados públicamente disponibles.
