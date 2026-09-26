@@ -8,11 +8,12 @@ DirectML (DirectX 12), que acelera por GPU en **NVIDIA, AMD e Intel** por
 igual sin ninguna configuración manual — ver [Detección automática de
 hardware](#detección-automática-de-hardware).
 
-No es un clon binario de Topaz Video AI (sus modelos son propietarios), pero
-cubre el mismo flujo funcional — reescalado por IA + desruido + realce de
+Cubre el flujo funcional — reescalado por IA + desruido + realce de
 detalle, con interfaz gráfica, vista previa lado a lado y exportación con
 codificación acelerada por hardware — usando modelos de IA reales y con
 pesos entrenados públicamente disponibles.
+
+<img width="1600" height="864" alt="image" src="https://github.com/user-attachments/assets/8cfa52ab-04ff-47b1-a7e9-02e956bf406f" />
 
 ## Cómo funciona la IA
 
