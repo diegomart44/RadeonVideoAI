@@ -8,6 +8,7 @@ Cubre el flujo funcional — reescalado por IA + desruido + realce de
 detalle, con interfaz gráfica, vista previa lado a lado y exportación con
 codificación por hardware AMD — usando modelos de IA reales y con pesos
 entrenados públicamente disponibles.
+<img width="1600" height="864" alt="image" src="https://github.com/user-attachments/assets/8cfa52ab-04ff-47b1-a7e9-02e956bf406f" />
 
 ## Cómo funciona la IA
 
