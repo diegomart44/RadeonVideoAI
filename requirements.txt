@@ -1,0 +1,16 @@
+PyQt6>=6.11
+torch>=2.4
+onnx>=1.16
+onnxruntime-directml>=1.20
+numpy>=1.26
+requests>=2.31
+psutil>=6.0
+
+# Generative recreation tab (Stable Diffusion img2img via optimum ONNX export)
+optimum>=2.1
+diffusers>=0.39
+transformers>=4.57
+accelerate>=1.15
+pillow>=12.0
+huggingface_hub>=0.36
+safetensors>=0.8

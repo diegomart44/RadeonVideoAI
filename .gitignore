@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# PyInstaller build artifacts (regenerate with build_portable.py)
+build/
+dist/
+
+# Runtime logs
+*.log
+
+# AI model weights and ONNX export cache (downloaded/generated automatically
+# on first use — see README; too large and regenerable to version-control)
+models/weights/*.pth
+models/weights/onnx_cache/
+
+# Portable FFmpeg binaries (200+ MB each, exceeds GitHub's file size limit —
+# see README for where to get them; the app also falls back to a system
+# PATH ffmpeg install if these aren't present)
+/ffmpeg.exe
+/ffprobe.exe
+
+# Hugging Face cache, if ever created inside the project instead of outside it
+hf_cache/
+
+# Test scratch output
+tests/temp/*
+!tests/temp/.gitkeep
+
+# Editor/OS cruft
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+
+# Virtualenvs
+venv/
+.venv/
+env/
