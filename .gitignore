@@ -13,6 +13,7 @@ dist/
 # AI model weights and ONNX export cache (downloaded/generated automatically
 # on first use — see README; too large and regenerable to version-control)
 models/weights/*.pth
+models/weights/*.onnx
 models/weights/onnx_cache/
 
 # Portable FFmpeg binaries (200+ MB each, exceeds GitHub's file size limit —

@@ -8,10 +8,11 @@ DirectML (DirectX 12), que acelera por GPU en **NVIDIA, AMD e Intel** por
 igual sin ninguna configuración manual — ver [Detección automática de
 hardware](#detección-automática-de-hardware).
 
-Cubre el flujo funcional — reescalado por IA + desruido + realce de
-detalle, con interfaz gráfica, vista previa lado a lado y exportación con
-codificación acelerada por hardware — usando modelos de IA reales y con
-pesos entrenados públicamente disponibles.
+Cubre tres flujos independientes — reescalado/restauración por IA, recreación
+generativa y aumento de FPS por interpolación de fotogramas — con interfaz
+gráfica, vista previa lado a lado y exportación con codificación acelerada
+por hardware, usando modelos de IA reales y con pesos entrenados
+públicamente disponibles.
 
 <img width="1600" height="864" alt="image" src="https://github.com/user-attachments/assets/8cfa52ab-04ff-47b1-a7e9-02e956bf406f" />
 
@@ -135,6 +136,37 @@ con IA" como herramienta principal — es determinista, no introduce
 parpadeo y tiene un modelo (BSRGAN) entrenado específicamente para ruido y
 artefactos de compresión reales. Trata "Generar" como experimental.
 
+## Pestaña "Interpolar (FPS)" — resumible
+
+Una tercera pestaña, también completamente independiente (`core/
+interpolation_engine.py` + `core/interpolation_models.py`), que **aumenta
+los FPS** del video generando fotogramas intermedios reales por flujo óptico
+— el mismo tipo de técnica que usan herramientas como Flowframes/SVP —, sin
+tocar la resolución ni tener relación con las otras dos pestañas:
+
+- **Modelo**: RIFE 4.9 (hzwer/Practical-RIFE, licencia MIT), pre-exportado a
+  un único grafo ONNX que acepta un `timestep` arbitrario, lo que permite
+  generar directamente x2 (1 fotograma intermedio en t=0.5) o x4 (3
+  fotogramas en t=0.25/0.5/0.75) sin encadenar pasadas. Corre por **ONNX
+  Runtime DirectML** — no Vulkan/ncnn como el rife-ncnn-vulkan que usa
+  Flowframes — para reutilizar exactamente el mismo camino de GPU
+  multi-fabricante ya validado en el resto de la app, sin sumar un stack de
+  inferencia nativo aparte.
+- **Resumible de verdad**: el progreso se guarda en un archivo `progress.json`
+  junto a una carpeta temporal (`.radeonvideoai_interp_<hash>` al lado del
+  destino). Si el proceso se corta por lo que sea (cierre, corte de luz,
+  cancelar a propósito), al volver a iniciar el mismo trabajo (mismo origen +
+  destino + multiplicador) continúa desde el último punto guardado en vez de
+  arrancar de cero.
+- **Prioriza espacio en disco**: en vez de ir dejando fotogramas sueltos sin
+  comprimir, cada checkpoint se guarda como un segmento de video ya
+  codificado; estos se van combinando periódicamente en un único archivo
+  acumulado y se borran apenas se confirman, así el uso de disco temporal
+  queda acotado al tamaño del video ya producido, no al de todos los
+  fotogramas interpolados sueltos.
+- El audio original se preserva sin tocar (la interpolación no cambia la
+  duración real del video, solo agrega fotogramas dentro del mismo tiempo).
+
 ## Requisitos
 
 - Windows 10/11 64-bit.
@@ -172,10 +204,10 @@ Python).
 
 ## Uso
 
-La app tiene dos pestañas totalmente independientes — "Reescalar con IA" y
-"Generar" (ver arriba) — cada una con su propio selector de vídeo y botones
-de Iniciar/Pausar/Cancelar. Arrastrar un archivo a la ventana lo carga en la
-pestaña que esté activa en ese momento.
+La app tiene tres pestañas totalmente independientes — "Reescalar con IA",
+"Generar" e "Interpolar (FPS)" (ver arriba) — cada una con su propio
+selector de vídeo y botones de Iniciar/Pausar/Cancelar. Arrastrar un archivo
+a la ventana lo carga en la pestaña que esté activa en ese momento.
 
 1. Arrastra un vídeo a la ventana (o usa "Examinar...").
 2. Elige factor de reescalado (1x restauración / 2x / 4x) y modelo de IA —
@@ -223,3 +255,7 @@ Stable Diffusion 1.5 (pestaña "Generar") se distribuye bajo licencia
 CreativeML Open RAIL-M — permisiva para uso personal y la mayoría de usos
 comerciales, con restricciones de uso aceptable (ver
 https://huggingface.co/spaces/CompVis/stable-diffusion-license).
+
+RIFE (pestaña "Interpolar") se distribuye bajo licencia MIT por sus autores
+(hzwer/Practical-RIFE); el export a ONNX usado aquí proviene de
+https://huggingface.co/edgetools/rife.

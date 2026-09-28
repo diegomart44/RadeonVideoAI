@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
 
 from core.engine import VideoProcessingEngine
 from core.generative_engine import GenerativeVideoEngine
+from core.interpolation_engine import InterpolationEngine
 from core.amd_backend import amd_hardware
 from core.media_pipeline import VideoMetadataReader
 from gui.theme import DARK_THEME_QSS
@@ -187,6 +188,63 @@ class GenerativeProcessingWorker(QObject):
         self.engine.cancel()
 
 
+class InterpolationProcessingWorker(QObject):
+    """
+    Asynchronous worker for the RIFE frame-interpolation engine. Its own
+    class, not shared with the other two workers, mirroring
+    core/interpolation_engine.py's separation from the other two engines.
+    Same plain-thread pattern (see ProcessingWorker's docstring for why
+    QThread specifically deadlocks with DirectML).
+    """
+
+    progress_signal = pyqtSignal(int, int, float, str, dict)
+    preview_signal = pyqtSignal(object, object)
+    finished_signal = pyqtSignal(bool, str)
+    status_signal = pyqtSignal(str)
+
+    def __init__(self, config: dict):
+        super().__init__()
+        self.config = config
+        self.engine = InterpolationEngine()
+
+    def start(self):
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self):
+        try:
+            success = self.engine.process_video(
+                input_path=self.config["input_path"],
+                output_path=self.config["output_path"],
+                multiplier=self.config["multiplier"],
+                encoder=self.config["encoder"],
+                bitrate_mbps=self.config["bitrate_mbps"],
+                progress_callback=self._on_progress,
+                preview_callback=self._on_preview,
+                status_callback=self._on_status
+            )
+            self.finished_signal.emit(success, "Interpolación completada con éxito." if success else "Interpolación cancelada — el progreso se guardó para reanudar.")
+        except Exception as e:
+            self.finished_signal.emit(False, f"Error en el motor de interpolación: {str(e)}")
+
+    def _on_progress(self, curr, total, fps, eta, vram_info):
+        self.progress_signal.emit(curr, total, fps, eta, vram_info)
+
+    def _on_preview(self, orig_rgb, ai_rgb):
+        self.preview_signal.emit(orig_rgb.copy(), ai_rgb.copy())
+
+    def _on_status(self, message: str):
+        self.status_signal.emit(message)
+
+    def pause(self):
+        self.engine.pause()
+
+    def resume(self):
+        self.engine.resume()
+
+    def cancel(self):
+        self.engine.cancel()
+
+
 class MainWindow(QMainWindow):
     """Main window integrating the Topaz-style interface, live preview, and pipeline."""
 
@@ -200,6 +258,7 @@ class MainWindow(QMainWindow):
 
         self.worker = None
         self.gen_worker = None
+        self.interp_worker = None
 
         self._build_ui()
 
@@ -257,6 +316,10 @@ class MainWindow(QMainWindow):
         self.controls.generate_pause_requested.connect(self._pause_generation)
         self.controls.generate_resume_requested.connect(self._resume_generation)
         self.controls.generate_cancel_requested.connect(self._cancel_generation)
+        self.controls.interpolate_requested.connect(self._start_interpolation)
+        self.controls.interpolate_pause_requested.connect(self._pause_interpolation)
+        self.controls.interpolate_resume_requested.connect(self._resume_interpolation)
+        self.controls.interpolate_cancel_requested.connect(self._cancel_interpolation)
         self.controls.file_selected.connect(self._on_file_selected)
         splitter.addWidget(self.controls)
 
@@ -380,4 +443,45 @@ class MainWindow(QMainWindow):
                 subprocess.run(f'explorer /select,"{os.path.abspath(out_file)}"', shell=True)
         else:
             QMessageBox.warning(self, "Aviso de Generación", message)
+
+    # =====================================================================
+    # Interpolar Fotogramas (RIFE) — fully independent flow, own worker/engine
+    # =====================================================================
+    def _start_interpolation(self, config: dict):
+        self.status_bar.reset_telemetry()
+        self.viewport.set_processing_state(True)
+        self.interp_worker = InterpolationProcessingWorker(config)
+        self.interp_worker.progress_signal.connect(self.status_bar.update_telemetry)
+        self.interp_worker.progress_signal.connect(self._on_viewport_progress)
+        self.interp_worker.preview_signal.connect(self.viewport.update_preview_frames)
+        self.interp_worker.finished_signal.connect(self._on_interpolation_finished)
+        self.interp_worker.status_signal.connect(self.status_bar.set_status)
+        self.interp_worker.start()
+
+    def _pause_interpolation(self):
+        if self.interp_worker:
+            self.interp_worker.pause()
+
+    def _resume_interpolation(self):
+        if self.interp_worker:
+            self.interp_worker.resume()
+
+    def _cancel_interpolation(self):
+        if self.interp_worker:
+            self.interp_worker.cancel()
+
+    def _on_interpolation_finished(self, success: bool, message: str):
+        self.controls.set_interpolation_finished()
+        self.viewport.set_processing_state(False)
+        if success:
+            out_file = self.controls.txt_interp_output.text().strip()
+            reply = QMessageBox.information(
+                self, "Interpolación Finalizada",
+                f"{message}\n\n¿Deseas abrir la carpeta con el video interpolado?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes and os.path.isfile(out_file):
+                subprocess.run(f'explorer /select,"{os.path.abspath(out_file)}"', shell=True)
+        else:
+            QMessageBox.information(self, "Interpolación en pausa", message)
 

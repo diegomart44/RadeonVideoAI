@@ -11,10 +11,14 @@ because they are two unrelated AI pipelines:
 - "🌌 Generar (IA Generativa)": Stable Diffusion img2img recreation
   (core/generative_engine.py + core/generative_models.py). Hallucinates new
   plausible detail; never changes resolution; much slower.
+- "🎞️ Interpolar Fotogramas (FPS)": RIFE optical-flow frame interpolation
+  (core/interpolation_engine.py + core/interpolation_models.py). Raises
+  frame rate (x2/x4) without touching resolution or per-frame detail;
+  resumable via on-disk checkpoints if interrupted.
 
 Keeping them as separate tabs with separate buttons (rather than one shared
-flow) was an explicit requirement — the two features must not be able to
-break each other, and the UI should not imply they're the same operation.
+flow) was an explicit requirement — the features must not be able to break
+each other, and the UI should not imply they're the same operation.
 """
 
 import os
@@ -41,7 +45,13 @@ class ControlsPanel(QWidget):
     generate_resume_requested = pyqtSignal()
     generate_cancel_requested = pyqtSignal()
 
-    # Fired whenever EITHER tab's input file changes, so the viewer can show
+    # Interpolar Fotogramas (RIFE, x2/x4 FPS)
+    interpolate_requested = pyqtSignal(dict)
+    interpolate_pause_requested = pyqtSignal()
+    interpolate_resume_requested = pyqtSignal()
+    interpolate_cancel_requested = pyqtSignal()
+
+    # Fired whenever ANY tab's input file changes, so the viewer can show
     # the first frame right away regardless of which pipeline gets used.
     file_selected = pyqtSignal(str)
 
@@ -52,6 +62,7 @@ class ControlsPanel(QWidget):
         self.setFixedWidth(self.PANEL_WIDTH)
         self._is_paused = False
         self._is_gen_paused = False
+        self._is_interp_paused = False
 
         self._build_ui()
 
@@ -132,6 +143,7 @@ class ControlsPanel(QWidget):
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_rescale_tab(), "🔍  Reescalar con IA")
         self.tabs.addTab(self._build_generate_tab(), "🌌  Generar (IA Generativa)")
+        self.tabs.addTab(self._build_interpolate_tab(), "🎞️  Interpolar (FPS)")
         main_layout.addWidget(self.tabs, stretch=1)
 
     # =====================================================================
@@ -409,12 +421,115 @@ class ControlsPanel(QWidget):
         outer_lay.addWidget(row)
         return outer
 
+    # =====================================================================
+    # Tab 3: Interpolar Fotogramas (RIFE, x2/x4 FPS) — resumable, own engine
+    # =====================================================================
+    def _build_interpolate_tab(self) -> QWidget:
+        outer = QWidget()
+        outer_lay = QVBoxLayout(outer)
+        outer_lay.setContentsMargins(0, 0, 0, 0)
+        outer_lay.setSpacing(12)
+
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(14)
+
+        grp_files = QGroupBox("📁  Video a Interpolar")
+        lay_files = QVBoxLayout(grp_files)
+        lay_files.setSpacing(6)
+
+        lay_files.addWidget(self._section_label("Video original"))
+        h_in = QHBoxLayout()
+        self.txt_interp_input = QLineEdit()
+        self.txt_interp_input.setPlaceholderText("Seleccionar archivo...")
+        btn_in = QPushButton("Examinar")
+        btn_in.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_in.clicked.connect(self._browse_interp_input)
+        h_in.addWidget(self.txt_interp_input)
+        h_in.addWidget(btn_in)
+        lay_files.addLayout(h_in)
+
+        lay_files.addWidget(self._section_label("Video interpolado (destino)"))
+        h_out = QHBoxLayout()
+        self.txt_interp_output = QLineEdit()
+        self.txt_interp_output.setPlaceholderText("Ruta de salida generada...")
+        btn_out = QPushButton("Guardar")
+        btn_out.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_out.clicked.connect(self._browse_interp_output)
+        h_out.addWidget(self.txt_interp_output)
+        h_out.addWidget(btn_out)
+        lay_files.addLayout(h_out)
+        layout.addWidget(grp_files)
+
+        grp_interp = QGroupBox("🎞️  Interpolación (RIFE)")
+        lay_interp = QVBoxLayout(grp_interp)
+        lay_interp.setSpacing(6)
+
+        notice = QLabel(
+            "Aumenta los FPS del video generando fotogramas intermedios reales "
+            "por flujo óptico (RIFE) — NO cambia la resolución ni tiene relación "
+            "con las otras dos pestañas. Si se corta por cualquier motivo "
+            "(cierre, corte de luz, cancelar), el progreso queda guardado en un "
+            "archivo temporal junto al destino: al reiniciar el mismo trabajo "
+            "continúa donde quedó en vez de arrancar de cero, y va liberando ese "
+            "espacio temporal a medida que confirma cada tramo ya interpolado."
+        )
+        notice.setObjectName("FieldLabel")
+        notice.setWordWrap(True)
+        lay_interp.addWidget(notice)
+
+        lay_interp.addWidget(self._section_label("Multiplicador de FPS"))
+        self.cmb_interp_mult = self._combo([
+            ("x2 — Recomendado", "Duplica los FPS (ej. 24 → 48). Un fotograma nuevo entre cada par de originales."),
+            ("x4 — Máxima fluidez", "Cuadruplica los FPS (ej. 24 → 96). Tres fotogramas nuevos entre cada par de originales; más lento."),
+        ])
+        lay_interp.addWidget(self.cmb_interp_mult)
+        layout.addWidget(grp_interp)
+
+        grp_enc3 = QGroupBox("🎬  Codificación (AMD AMF)")
+        lay_enc3 = QVBoxLayout(grp_enc3)
+        lay_enc3.setSpacing(6)
+
+        lay_enc3.addWidget(self._section_label("Códec de salida"))
+        self.cmb_interp_encoder = self._combo([
+            ("HEVC (H.265) — Hardware AMD", "hevc_amf — Acelerado por la GPU AMD. Mejor compresión."),
+            ("H.264 — Hardware AMD", "h264_amf — Acelerado por la GPU AMD. Máxima compatibilidad."),
+            ("HEVC (H.265) — Software", "libx265 — Usa la CPU. Más lento, sin AMF."),
+            ("H.264 — Software", "libx264 — Usa la CPU. Más lento, sin AMF."),
+        ])
+        lay_enc3.addWidget(self.cmb_interp_encoder)
+
+        lay_enc3.addWidget(self._section_label("Tasa de bits"))
+        h_bitrate3 = QHBoxLayout()
+        self.spn_interp_bitrate = QSpinBox()
+        self.spn_interp_bitrate.setRange(5, 150)
+        self.spn_interp_bitrate.setValue(25)
+        self.spn_interp_bitrate.setSuffix(" Mbps")
+        h_bitrate3.addWidget(self.spn_interp_bitrate)
+        lay_enc3.addLayout(h_bitrate3)
+        layout.addWidget(grp_enc3)
+
+        layout.addStretch(1)
+        outer_lay.addWidget(self._scroll_wrap(container), stretch=1)
+
+        row, self.btn_interp_start, self.btn_interp_pause, self.btn_interp_cancel = self._action_row(
+            "🎞️  INTERPOLAR FOTOGRAMAS",
+            "Aumenta los FPS del video generando fotogramas intermedios reales por flujo óptico (RIFE). Resumible si se interrumpe.",
+            self._on_interp_start_clicked, self._on_interp_pause_clicked, self._on_interp_cancel_clicked
+        )
+        outer_lay.addWidget(row)
+        return outer
+
     def set_active_tab_input_path(self, path: str):
         """Routes a dropped/selected file to whichever tab is currently
-        showing (index 0 = Reescalar, 1 = Generar), so drag-and-drop feels
-        consistent with whichever pipeline the user is currently looking at."""
-        if self.tabs.currentIndex() == 1:
+        showing (0 = Reescalar, 1 = Generar, 2 = Interpolar), so drag-and-drop
+        feels consistent with whichever pipeline the user is currently looking at."""
+        idx = self.tabs.currentIndex()
+        if idx == 1:
             self.set_gen_input_path(path)
+        elif idx == 2:
+            self.set_interp_input_path(path)
         else:
             self.set_input_path(path)
 
@@ -592,3 +707,80 @@ class ControlsPanel(QWidget):
         self.btn_gen_cancel.setEnabled(False)
         self.btn_gen_pause.setText("⏸  Pausar")
         self._is_gen_paused = False
+
+    # =====================================================================
+    # Interpolar: file pickers & start/pause/cancel (fully independent)
+    # =====================================================================
+    def set_interp_input_path(self, path: str):
+        self.txt_interp_input.setText(path)
+        base, ext = os.path.splitext(path)
+        mult_tag = "x2" if self.cmb_interp_mult.currentIndex() == 0 else "x4"
+        self.txt_interp_output.setText(f"{base}_{mult_tag}FPS.mp4")
+        self.file_selected.emit(path)
+
+    def _browse_interp_input(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Seleccionar Video", "",
+            "Archivos de Video (*.mp4 *.mkv *.mov *.avi *.webm *.ts);;Todos los Archivos (*.*)"
+        )
+        if path:
+            self.set_interp_input_path(path)
+
+    def _browse_interp_output(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Guardar Video Interpolado", self.txt_interp_output.text() or "",
+            "Archivo MP4 (*.mp4);;Archivo MKV (*.mkv)"
+        )
+        if path:
+            self.txt_interp_output.setText(path)
+
+    def _on_interp_start_clicked(self):
+        in_p = self.txt_interp_input.text().strip()
+        out_p = self.txt_interp_output.text().strip()
+        if not in_p or not os.path.isfile(in_p):
+            return
+
+        multiplier = 2 if self.cmb_interp_mult.currentIndex() == 0 else 4
+
+        enc_raw = self.cmb_interp_encoder.currentText()
+        if "HEVC" in enc_raw and "Hardware" in enc_raw:
+            encoder = "hevc_amf"
+        elif "H.264" in enc_raw and "Hardware" in enc_raw:
+            encoder = "h264_amf"
+        elif "HEVC" in enc_raw:
+            encoder = "libx265"
+        else:
+            encoder = "libx264"
+
+        config = {
+            "input_path": in_p,
+            "output_path": out_p,
+            "multiplier": multiplier,
+            "encoder": encoder,
+            "bitrate_mbps": self.spn_interp_bitrate.value(),
+        }
+
+        self.btn_interp_start.setEnabled(False)
+        self.btn_interp_pause.setEnabled(True)
+        self.btn_interp_cancel.setEnabled(True)
+        self.interpolate_requested.emit(config)
+
+    def _on_interp_pause_clicked(self):
+        if not self._is_interp_paused:
+            self._is_interp_paused = True
+            self.btn_interp_pause.setText("▶  Reanudar")
+            self.interpolate_pause_requested.emit()
+        else:
+            self._is_interp_paused = False
+            self.btn_interp_pause.setText("⏸  Pausar")
+            self.interpolate_resume_requested.emit()
+
+    def _on_interp_cancel_clicked(self):
+        self.interpolate_cancel_requested.emit()
+
+    def set_interpolation_finished(self):
+        self.btn_interp_start.setEnabled(True)
+        self.btn_interp_pause.setEnabled(False)
+        self.btn_interp_cancel.setEnabled(False)
+        self.btn_interp_pause.setText("⏸  Pausar")
+        self._is_interp_paused = False

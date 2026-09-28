@@ -223,19 +223,23 @@ class VideoMetadataReader:
 class FFmpegFrameReader:
     """Streams raw uncompressed video frames via binary pipe directly from FFmpeg stdout."""
 
-    def __init__(self, input_path: str, width: int, height: int):
+    def __init__(self, input_path: str, width: int, height: int, start_time: float = 0.0):
         self.input_path = input_path
         self.width = width
         self.height = height
         self.frame_bytes_size = width * height * 3  # RGB24 format
+        self.start_time = start_time
         self.process: Optional[subprocess.Popen] = None
         self._open_pipe()
 
     def _open_pipe(self):
         ffmpeg = FFmpegLocator.get_ffmpeg_path()
-        cmd = [
-            ffmpeg,
-            "-v", "error",
+        cmd = [ffmpeg, "-v", "error"]
+        # Input seeking (-ss before -i) so a resumed job can skip straight to
+        # its checkpointed frame instead of re-decoding everything before it.
+        if self.start_time > 0:
+            cmd += ["-ss", f"{self.start_time:.6f}"]
+        cmd += [
             "-i", self.input_path,
             "-f", "rawvideo",
             "-pix_fmt", "rgb24",
@@ -291,7 +295,8 @@ class FFmpegFrameWriter:
         fps: float,
         has_audio: bool = True,
         encoder: str = "hevc_amf",
-        bitrate_mbps: int = 25
+        bitrate_mbps: int = 25,
+        disable_bframes: bool = False
     ):
         self.output_path = output_path
         self.input_source_for_audio = input_source_for_audio
@@ -301,6 +306,14 @@ class FFmpegFrameWriter:
         self.has_audio = has_audio
         self.encoder = encoder
         self.bitrate_mbps = bitrate_mbps
+        # Used only when this writer produces one of several independently
+        # encoded chunks later joined by stream copy (interpolation engine's
+        # resumable segments): B-frame reordering makes a short segment's
+        # last frame duration slightly ambiguous, which showed up as a small
+        # timestamp jump at every segment join once concatenated. Disabling
+        # B-frames for just those segments removes the ambiguity; a normal
+        # single-shot encode (restoration/generative tabs) never sets this.
+        self.disable_bframes = disable_bframes
         self.process: Optional[subprocess.Popen] = None
         self._start_encoding()
 
@@ -358,6 +371,9 @@ class FFmpegFrameWriter:
                 "-crf", "18",
                 "-pix_fmt", "yuv420p"
             ]
+
+        if self.disable_bframes:
+            cmd += ["-bf", "0"]
 
         # Preserve original audio without re-encoding
         if self.has_audio:

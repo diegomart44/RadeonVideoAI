@@ -33,6 +33,12 @@ MODEL_URLS = {
         "https://github.com/cszn/KAIR/releases/download/v1.0/BSRGAN.pth",
     "4x-UltraSharp.pth":
         "https://huggingface.co/Kim2091/UltraSharp/resolve/main/4x-UltraSharp.pth",
+    # RIFE 4.9 (hzwer/Practical-RIFE, MIT license) — pre-exported to a single
+    # self-contained ONNX graph (img0, img1, timestep -> interpolated frame),
+    # used by the frame-interpolation feature. No PyTorch export step needed
+    # here, unlike the Real-ESRGAN checkpoints above.
+    "rife49.onnx":
+        "https://huggingface.co/edgetools/rife/resolve/main/rife49.onnx",
 }
 
 ProgressCB = Optional[Callable[[int, int, str], None]]
