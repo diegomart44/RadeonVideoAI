@@ -23,6 +23,7 @@ each other, and the UI should not imply they're the same operation.
 
 import os
 from PyQt6.QtCore import pyqtSignal, Qt
+from core.media_pipeline import VideoMetadataReader
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QComboBox, QSlider, QSpinBox, QCheckBox,
@@ -63,6 +64,7 @@ class ControlsPanel(QWidget):
         self._is_paused = False
         self._is_gen_paused = False
         self._is_interp_paused = False
+        self._interp_source_meta = None
 
         self._build_ui()
 
@@ -484,7 +486,13 @@ class ControlsPanel(QWidget):
             ("x2 — Recomendado", "Duplica los FPS (ej. 24 → 48). Un fotograma nuevo entre cada par de originales."),
             ("x4 — Máxima fluidez", "Cuadruplica los FPS (ej. 24 → 96). Tres fotogramas nuevos entre cada par de originales; más lento."),
         ])
+        self.cmb_interp_mult.currentIndexChanged.connect(self._update_interp_fps_preview)
         lay_interp.addWidget(self.cmb_interp_mult)
+
+        self.lbl_interp_preview = QLabel("Elegí un video para ver los FPS y la resolución resultantes.")
+        self.lbl_interp_preview.setObjectName("FieldLabel")
+        self.lbl_interp_preview.setWordWrap(True)
+        lay_interp.addWidget(self.lbl_interp_preview)
         layout.addWidget(grp_interp)
 
         grp_enc3 = QGroupBox("🎬  Codificación (AMD AMF)")
@@ -716,7 +724,28 @@ class ControlsPanel(QWidget):
         base, ext = os.path.splitext(path)
         mult_tag = "x2" if self.cmb_interp_mult.currentIndex() == 0 else "x4"
         self.txt_interp_output.setText(f"{base}_{mult_tag}FPS.mp4")
+
+        try:
+            self._interp_source_meta = VideoMetadataReader.probe(path)
+        except Exception:
+            self._interp_source_meta = None
+        self._update_interp_fps_preview()
+
         self.file_selected.emit(path)
+
+    def _update_interp_fps_preview(self):
+        meta = self._interp_source_meta
+        if not meta or not meta.get("fps"):
+            self.lbl_interp_preview.setText("Elegí un video para ver los FPS y la resolución resultantes.")
+            return
+        multiplier = 2 if self.cmb_interp_mult.currentIndex() == 0 else 4
+        src_fps = meta["fps"]
+        out_fps = src_fps * multiplier
+        w, h = meta.get("width", 0), meta.get("height", 0)
+        self.lbl_interp_preview.setText(
+            f"Original: {w}x{h} @ {src_fps:.2f} fps  →  Resultado: {w}x{h} @ {out_fps:.2f} fps "
+            f"(x{multiplier}). La resolución NO cambia, solo los FPS."
+        )
 
     def _browse_interp_input(self):
         path, _ = QFileDialog.getOpenFileName(
