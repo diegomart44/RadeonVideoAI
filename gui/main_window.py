@@ -1,6 +1,15 @@
 """
 Main Application Window for RadeonVideoAI Desktop Suite.
 Connects UI controls, real-time side-by-side viewport, and async processing worker.
+
+NOTE: the three engine classes (VideoProcessingEngine, GenerativeVideoEngine,
+InterpolationEngine) are imported lazily, inside each worker's __init__,
+rather than at module level. VideoProcessingEngine/GenerativeVideoEngine
+pull in PyTorch, which is a large resident-memory cost on its own — on a
+16GB-RAM machine that matters even before any AI job starts, since just
+launching the app would otherwise load PyTorch whether or not the user ever
+touches those tabs. A user who only ever uses "Interpolar" (which needs
+nothing but ONNX Runtime) now never pays that cost.
 """
 
 import os
@@ -13,9 +22,6 @@ from PyQt6.QtWidgets import (
     QSplitter, QMessageBox, QLabel
 )
 
-from core.engine import VideoProcessingEngine
-from core.generative_engine import GenerativeVideoEngine
-from core.interpolation_engine import InterpolationEngine
 from core.amd_backend import amd_hardware
 from core.media_pipeline import VideoMetadataReader
 from gui.theme import DARK_THEME_QSS
@@ -76,6 +82,7 @@ class ProcessingWorker(QObject):
 
     def __init__(self, config: dict):
         super().__init__()
+        from core.engine import VideoProcessingEngine
         self.config = config
         self.engine = VideoProcessingEngine()
 
@@ -144,6 +151,7 @@ class GenerativeProcessingWorker(QObject):
 
     def __init__(self, config: dict):
         super().__init__()
+        from core.generative_engine import GenerativeVideoEngine
         self.config = config
         self.engine = GenerativeVideoEngine()
 
@@ -204,6 +212,7 @@ class InterpolationProcessingWorker(QObject):
 
     def __init__(self, config: dict):
         super().__init__()
+        from core.interpolation_engine import InterpolationEngine
         self.config = config
         self.engine = InterpolationEngine()
 

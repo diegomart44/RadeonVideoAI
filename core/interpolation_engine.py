@@ -42,6 +42,7 @@ import logging
 import threading
 import subprocess
 import numpy as np
+import psutil
 from typing import Callable, Optional, Dict, Any, List
 
 from .amd_backend import amd_hardware
@@ -299,8 +300,14 @@ class InterpolationEngine:
                     eta_str = f"{hh:02d}:{m:02d}:{s:02d}"
 
                 if progress_callback:
+                    # No tiling here (full-frame RIFE, not memory-managed like
+                    # the other two engines) — "vram_used_pct" reuses system
+                    # RAM pressure as the same rough proxy MemoryManager uses
+                    # elsewhere, which matters here because a RAM-constrained
+                    # machine (not the GPU) is the realistic bottleneck for
+                    # this engine's full-frame (non-tiled) processing.
                     telemetry = {
-                        "vram_used_pct": 0,
+                        "vram_used_pct": int(psutil.virtual_memory().percent),
                         "tile_size": 0,
                         "device": amd_hardware.backend_name
                     }

@@ -71,7 +71,12 @@ class StatusBarWidget(QWidget):
         tile_sz = vram_info.get("tile_size", 512)
         total_gb = amd_hardware.vram_total_mb / 1024.0
         used_gb = (vram_pct / 100.0) * total_gb
-        self.lbl_vram.setText(f"VRAM: {used_gb:.1f} / {total_gb:.1f} GB ({vram_pct}%) [Tile: {tile_sz}]")
+        # tile_size is only meaningful for the tiled engines (Reescalar/
+        # Generar); the interpolation engine processes full frames and
+        # reports 0/None here, so the "[Tile: N]" suffix is omitted rather
+        # than showing a confusing "[Tile: 0]".
+        tile_suffix = f" [Tile: {tile_sz}]" if tile_sz else ""
+        self.lbl_vram.setText(f"VRAM: {used_gb:.1f} / {total_gb:.1f} GB ({vram_pct}%){tile_suffix}")
 
     def reset_telemetry(self):
         self.progress_bar.setValue(0)
