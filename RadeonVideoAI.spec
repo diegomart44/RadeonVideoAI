@@ -15,10 +15,18 @@ block_cipher = None
 PROJECT_DIR = os.path.abspath(SPECPATH)
 
 # 1. Collect PyTorch data and DLL dependencies
+#
+# Deliberately NOT bundling models/ (models/weights/*): every AI checkpoint
+# under there — Real-ESRGAN .pth files, the Stable Diffusion ONNX export
+# cache, the RIFE Vulkan binary — is downloaded on first use at runtime, not
+# meant to ship in the portable build. It used to be blanket-included here,
+# which silently made every build bundle whatever happened to already be
+# cached on the machine doing the build (the Stable Diffusion onnx_cache/
+# alone reached 4+ GB during development and made PyInstaller's file
+# enumeration pass grind to a near-standstill).
 datas = [
     (os.path.join(PROJECT_DIR, "core"), "core"),
     (os.path.join(PROJECT_DIR, "gui"), "gui"),
-    (os.path.join(PROJECT_DIR, "models"), "models"),
 ]
 datas += collect_data_files('torch')
 datas += collect_data_files('onnxruntime')

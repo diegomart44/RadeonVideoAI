@@ -15,6 +15,7 @@ dist/
 models/weights/*.pth
 models/weights/*.onnx
 models/weights/onnx_cache/
+models/weights/rife_vulkan/
 
 # Portable FFmpeg binaries (200+ MB each, exceeds GitHub's file size limit —
 # see README for where to get them; the app also falls back to a system

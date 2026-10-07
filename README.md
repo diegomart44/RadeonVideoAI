@@ -144,26 +144,34 @@ los FPS** del video generando fotogramas intermedios reales por flujo óptico
 — el mismo tipo de técnica que usan herramientas como Flowframes/SVP —, sin
 tocar la resolución ni tener relación con las otras dos pestañas:
 
-- **Modelo**: RIFE 4.9 (hzwer/Practical-RIFE, licencia MIT), pre-exportado a
-  un único grafo ONNX que acepta un `timestep` arbitrario, lo que permite
-  generar directamente x2 (1 fotograma intermedio en t=0.5) o x4 (3
-  fotogramas en t=0.25/0.5/0.75) sin encadenar pasadas. Corre por **ONNX
-  Runtime DirectML** — no Vulkan/ncnn como el rife-ncnn-vulkan que usa
-  Flowframes — para reutilizar exactamente el mismo camino de GPU
-  multi-fabricante ya validado en el resto de la app, sin sumar un stack de
-  inferencia nativo aparte.
+- **Motor**: [`rife-ncnn-vulkan`](https://github.com/nihui/rife-ncnn-vulkan)
+  (licencia MIT) con el modelo RIFE v4.6 — el mismo binario nativo
+  ncnn+Vulkan que usa Flowframes internamente, no una reimplementación. Se
+  probó primero una ruta propia vía ONNX Runtime DirectML (reutilizando el
+  mismo camino de GPU que el resto de la app), pero midiendo cabeza a
+  cabeza contra Flowframes en esta misma PC resultó consistentemente más
+  lenta — el FP16 nativo de ncnn simplemente funciona, mientras que
+  convertir el grafo ONNX de RIFE a FP16 chocó con varios errores internos
+  de compatibilidad de tipos. Solo se empaqueta el ejecutable + el modelo
+  v4.6 (~12 MB, re-empaquetado desde el release oficial que trae los ~430MB
+  de *todas* las versiones de RIFE), descargado una única vez desde un
+  release de este mismo repositorio. x4 se logra encadenando dos pasadas
+  x2 — igual que hace Flowframes (confirmado en los logs de una corrida
+  real de Flowframes durante el desarrollo).
 - **Resumible de verdad**: el progreso se guarda en un archivo `progress.json`
   junto a una carpeta temporal (`.radeonvideoai_interp_<hash>` al lado del
   destino). Si el proceso se corta por lo que sea (cierre, corte de luz,
   cancelar a propósito), al volver a iniciar el mismo trabajo (mismo origen +
   destino + multiplicador) continúa desde el último punto guardado en vez de
   arrancar de cero.
-- **Prioriza espacio en disco**: en vez de ir dejando fotogramas sueltos sin
-  comprimir, cada checkpoint se guarda como un segmento de video ya
-  codificado; estos se van combinando periódicamente en un único archivo
-  acumulado y se borran apenas se confirman, así el uso de disco temporal
-  queda acotado al tamaño del video ya producido, no al de todos los
-  fotogramas interpolados sueltos.
+- **Prioriza espacio en disco**: `rife-ncnn-vulkan` solo expone una interfaz
+  por lotes de carpetas (no fotograma a fotograma), así que se extrae un
+  lote chico (~120 fotogramas) a PNG, se interpola, se codifica a un
+  segmento de video comprimido y se borran los PNG — nunca se acumulan los
+  fotogramas de todo el video sueltos en disco, solo los de un lote por
+  vez. Esos segmentos ya codificados se van combinando periódicamente en un
+  único archivo acumulado y se borran apenas se confirman, así el uso de
+  disco temporal queda acotado al tamaño del video ya producido.
 - El audio original se preserva sin tocar (la interpolación no cambia la
   duración real del video, solo agrega fotogramas dentro del mismo tiempo).
 
@@ -256,6 +264,8 @@ CreativeML Open RAIL-M — permisiva para uso personal y la mayoría de usos
 comerciales, con restricciones de uso aceptable (ver
 https://huggingface.co/spaces/CompVis/stable-diffusion-license).
 
-RIFE (pestaña "Interpolar") se distribuye bajo licencia MIT por sus autores
-(hzwer/Practical-RIFE); el export a ONNX usado aquí proviene de
-https://huggingface.co/edgetools/rife.
+`rife-ncnn-vulkan` (pestaña "Interpolar") se distribuye bajo licencia MIT
+por su autor (nihui); ver
+https://github.com/nihui/rife-ncnn-vulkan/blob/master/LICENSE. El paquete
+reducido que descarga esta app (solo el ejecutable + modelo v4.6, en vez
+del release oficial completo de ~430MB) incluye esa misma licencia.

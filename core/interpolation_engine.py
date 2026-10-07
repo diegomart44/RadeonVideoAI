@@ -1,34 +1,42 @@
 """
-Frame Interpolation Engine (RIFE, x2/x4 FPS) — resumable, disk-conscious.
+Frame Interpolation Engine (rife-ncnn-vulkan, x2/x4 FPS) — resumable, disk-conscious.
 
 Deliberately separate from core/engine.py and core/generative_engine.py:
 raising frame rate via optical-flow interpolation is a third, unrelated AI
 pipeline with its own tab, worker and failure modes.
 
-Resumability & disk usage, by design:
-- Progress is checkpointed to disk every SEGMENT_SOURCE_FRAMES source frames
-  as a small encoded MPEG-TS segment (compact — already-compressed video,
-  not raw frames) in a job-scoped temp folder. This is what makes a crash
-  cheap to recover from: at most one checkpoint's worth of work is repeated.
-- Small segments are batched: once CONSOLIDATE_BATCH of them have piled up,
-  they're merged with whatever was already consolidated into one
-  `accumulated.ts` via ffmpeg's concat demuxer (`-c copy`, no re-encoding —
-  and the technically correct way to join multiple independently-encoded
-  TS files, since it rebases each file's timestamps; naive byte-level TS
-  concatenation would leave every segment's PTS restarting near zero and
-  produce a broken output). The now-redundant small segments are deleted
-  right after — this is what keeps disk usage bounded to "encoded output
-  produced so far" instead of piling up loose interpolated frames for the
-  whole video. Batching (rather than consolidating on every single
-  checkpoint) keeps the repeated re-copy of `accumulated.ts` from growing
-  quadratically with video length.
-- `progress.json` records how many source frames are safely accounted for
-  (whether already inside accumulated.ts or still sitting as pending
-  segment files) plus the source file's size/mtime, so a resume against a
-  since-changed source file is detected and discarded rather than silently
-  producing a mismatched result.
-- On cancel (or a crash), this state is left in place on purpose — the next
-  run with the same input+output+multiplier resumes via `-ss` input seeking
+Why PNG batches instead of the raw-pipe streaming the other two engines
+use: rife-ncnn-vulkan (core/interpolation_models.py) only exposes a
+folder-batch interface, not a per-pair callable API — unlike this app's
+first ONNX-Runtime-based attempt, which could stream frame-by-frame but
+measured meaningfully slower than Flowframes' own use of this exact same
+native binary. A batch of SEGMENT_SOURCE_FRAMES source frames is extracted
+to a temp PNG folder, interpolated (one 2x pass, or two chained for 4x —
+the same way Flowframes does 4x, confirmed from its own log output), then
+immediately re-encoded and the PNGs deleted — so disk usage stays bounded
+to one batch's worth of loose frames, never the whole video.
+
+Batch boundaries and the duplicate frames they create: every batch is its
+own fresh rife-ncnn-vulkan run, and the tool always emits the *first* input
+frame verbatim as its own output[0], plus (confirmed empirically — see
+PNG byte-for-byte comparisons during development) one extra byte-identical
+duplicate of the *last* output frame when a batch ends. Consecutive batches
+share one overlap frame (the previous batch's true last source frame) so
+the interpolated transition between batches isn't just skipped, and the
+resulting duplicates at that shared seam are trimmed by direct byte
+comparison (`_trim_trailing_duplicates_inplace` / `_trim_leading_duplicates`)
+rather than by precomputing exact
+counts per multiplier — simpler and correct regardless of how many passes
+produced the output.
+
+Resumability & disk usage, otherwise unchanged from the first version:
+- Each finished segment is a small encoded MPEG-TS file, checkpointed to
+  `progress.json` in a job-scoped temp folder; batched (CONSOLIDATE_BATCH
+  at a time) into one growing `accumulated.ts` via ffmpeg's `concat:`
+  PROTOCOL — not the concat demuxer, which was found during development to
+  introduce a small timestamp jump at every join — then deleted.
+- A crash or cancel leaves this state in place on purpose; the next run
+  against the same input+output+multiplier resumes via `-ss` input seeking
   instead of restarting. Only a successful full completion does the final
   consolidation + audio remux and deletes the temp folder.
 """
@@ -42,12 +50,11 @@ import logging
 import threading
 import subprocess
 import numpy as np
-import psutil
 from typing import Callable, Optional, Dict, Any, List
 
 from .amd_backend import amd_hardware
-from .media_pipeline import FFmpegLocator, VideoMetadataReader, FFmpegFrameReader, FFmpegFrameWriter
-from .interpolation_models import create_interpolation_model, timesteps_for_multiplier
+from .media_pipeline import FFmpegLocator, VideoMetadataReader
+from .interpolation_models import RifeVulkanModel
 
 logger = logging.getLogger("RadeonVideoAI.InterpolationEngine")
 
@@ -103,12 +110,8 @@ def _save_progress(temp_dir: str, input_path: str, completed_source_frames: int,
 def _consolidate(accumulated_ts: str, pending_segments: List[str], temp_dir: str):
     """Merges accumulated.ts (if any) + all pending segments into a new
     accumulated.ts using ffmpeg's `concat:` PROTOCOL (raw stream-level TS
-    concatenation), not the general-purpose concat DEMUXER. The demuxer
-    re-derives each file's duration/timestamp offset and was empirically
-    found to introduce a small (~half a frame) timestamp jump at every
-    join — the concat protocol instead relies on MPEG-TS's own continuous
-    PCR/PTS stream design and joins cleanly with no drift (verified frame
-    by frame with `showinfo` before adopting this)."""
+    concatenation), not the general-purpose concat DEMUXER — see module
+    docstring for why."""
     if not pending_segments:
         return
     if not os.path.isfile(accumulated_ts) and len(pending_segments) == 1:
@@ -133,8 +136,104 @@ def _consolidate(accumulated_ts: str, pending_segments: List[str], temp_dir: str
     os.replace(new_accumulated, accumulated_ts)
 
 
+def _extract_frames_png(input_path: str, seek_time: float, count: int, out_dir: str):
+    os.makedirs(out_dir, exist_ok=True)
+    ffmpeg = FFmpegLocator.get_ffmpeg_path()
+    cmd = [ffmpeg, "-y", "-v", "error"]
+    if seek_time > 0:
+        cmd += ["-ss", f"{seek_time:.6f}"]
+    cmd += ["-i", input_path, "-frames:v", str(count), os.path.join(out_dir, "%08d.png")]
+    subprocess.run(cmd, check=True, capture_output=True, text=True, creationflags=_NO_WINDOW_FLAGS)
+
+
+def _is_identical_pixels(path_a: str, path_b: str) -> bool:
+    """Pixel-level (not byte-level) comparison: the leading-duplicate check
+    compares a PNG written by ffmpeg against one written by rife-ncnn-vulkan
+    for the same source frame — pixel-identical, but not necessarily
+    byte-identical, since the two tools' PNG encoders don't produce the
+    same bytes for identical pixel content (different metadata/compression).
+    The trailing-duplicate check compares two rife-ncnn-vulkan outputs,
+    which already are byte-identical, but pixel comparison is correct there
+    too and keeps this one code path simple."""
+    a = _read_png_rgb(path_a)
+    b = _read_png_rgb(path_b)
+    if a is None or b is None or a.shape != b.shape:
+        return False
+    return np.array_equal(a, b)
+
+
+def _trim_trailing_duplicates_inplace(out_dir: str, sorted_names: List[str]) -> List[str]:
+    """Deletes (from disk, not just the list) the trailing duplicate
+    rife-ncnn-vulkan leaves at the end of every batch, and returns the
+    remaining names. Must run right after EVERY pass, not just once at the
+    very end: for a second (4x) pass, the duplicate's two copies of the
+    final frame would otherwise both feed into that pass, which then
+    computes an actual (floating-point, not exactly identical) interpolated
+    "midpoint" between two bit-identical images — a near-duplicate the
+    exact-pixel check below can no longer catch, compounding into 2-3
+    leftover near-duplicate frames instead of the expected one. Trimming
+    the clean, exactly-duplicate pair before it ever reaches a next pass
+    avoids creating that fuzzy near-duplicate in the first place."""
+    names = list(sorted_names)
+    while len(names) >= 2 and _is_identical_pixels(os.path.join(out_dir, names[-1]), os.path.join(out_dir, names[-2])):
+        os.remove(os.path.join(out_dir, names[-1]))
+        names.pop()
+    return names
+
+
+def _trim_leading_duplicates(out_dir: str, sorted_names: List[str], leading_ref_path: Optional[str]) -> List[str]:
+    """Drops the leading frame(s) that match leading_ref_path: the segment's
+    own shared overlap frame, already written as the previous segment's
+    last output frame. Only needs to run once, on the final pass's output —
+    unlike the trailing duplicate, nothing about chaining two passes makes
+    this fuzzy, since there's no equivalent adjacent-identical-frame pair
+    on the leading side to compound."""
+    names = list(sorted_names)
+    if leading_ref_path:
+        while names and _is_identical_pixels(os.path.join(out_dir, names[0]), leading_ref_path):
+            names.pop(0)
+    return names
+
+
+def _encode_png_sequence(png_dir: str, start_number: int, frame_count: int, out_fps: float,
+                          segment_path: str, encoder: str, bitrate_mbps: int):
+    ffmpeg = FFmpegLocator.get_ffmpeg_path()
+    cmd = [
+        ffmpeg, "-y", "-v", "error",
+        "-start_number", str(start_number),
+        "-r", f"{out_fps:.4f}",
+        "-i", os.path.join(png_dir, "%08d.png"),
+        "-frames:v", str(frame_count),
+    ]
+    if encoder == "hevc_amf":
+        cmd += ["-c:v", "hevc_amf", "-quality", "quality", "-rc", "cbr",
+                "-b:v", f"{bitrate_mbps}M", "-maxrate", f"{bitrate_mbps + 10}M",
+                "-bufsize", f"{bitrate_mbps * 2}M", "-pix_fmt", "yuv420p"]
+    elif encoder == "h264_amf":
+        cmd += ["-c:v", "h264_amf", "-quality", "quality", "-rc", "cbr",
+                "-b:v", f"{bitrate_mbps}M", "-pix_fmt", "yuv420p"]
+    elif encoder == "libx265":
+        cmd += ["-c:v", "libx265", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p"]
+    else:
+        cmd += ["-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p"]
+    # -bf 0: avoids PTS jumps where independently-encoded segments later join
+    # (see _consolidate / the module docstring on the concat demuxer finding).
+    cmd += ["-bf", "0", "-f", "mpegts", segment_path]
+    res = subprocess.run(cmd, capture_output=True, text=True, creationflags=_NO_WINDOW_FLAGS)
+    if res.returncode != 0:
+        raise RuntimeError(f"Fallo al codificar un segmento interpolado: {res.stderr}")
+
+
+def _read_png_rgb(path: str) -> Optional[np.ndarray]:
+    try:
+        from PIL import Image
+        return np.array(Image.open(path).convert("RGB"))
+    except Exception:
+        return None
+
+
 class InterpolationEngine:
-    """Resumable RIFE frame-interpolation pipeline (x2/x4 FPS)."""
+    """Resumable rife-ncnn-vulkan frame-interpolation pipeline (x2/x4 FPS)."""
 
     def __init__(self):
         self.is_running = False
@@ -171,84 +270,42 @@ class InterpolationEngine:
         self.is_paused = False
         self._pause_event.set()
 
-        reader: Optional[FFmpegFrameReader] = None
-        segment_writer: Optional[FFmpegFrameWriter] = None
-
         def _status(msg):
             if status_callback:
                 status_callback(msg)
 
         try:
             meta = VideoMetadataReader.probe(input_path)
-            w, h = meta["width"], meta["height"]
             fps = meta["fps"]
             total_frames = meta["total_frames"]
             has_audio = meta["has_audio"]
             out_fps = fps * multiplier
+            passes = 1 if multiplier == 2 else 2
 
             temp_dir = _job_temp_dir(input_path, output_path, multiplier)
             os.makedirs(temp_dir, exist_ok=True)
             accumulated_ts = os.path.join(temp_dir, "accumulated.ts")
 
             state = _load_progress(temp_dir, input_path)
-            resume_frame = state["completed_source_frames"]
+            frame_idx = state["completed_source_frames"]
             pending_segments: List[str] = state["pending_segments"]
-            if resume_frame == 0 and not pending_segments and os.path.isfile(accumulated_ts):
+            if frame_idx == 0 and not pending_segments and os.path.isfile(accumulated_ts):
                 os.remove(accumulated_ts)  # stale leftover from a different/changed source
 
-            if resume_frame > 0:
-                logger.info(f"Reanudando interpolación desde el fotograma {resume_frame}.")
-                _status(f"Progreso anterior encontrado — reanudando desde el fotograma {resume_frame}/{total_frames}...")
+            if frame_idx > 0:
+                logger.info(f"Reanudando interpolación desde el fotograma {frame_idx}.")
+                _status(f"Progreso anterior encontrado — reanudando desde el fotograma {frame_idx}/{total_frames}...")
             else:
-                _status("Preparando modelo de interpolación (puede descargar la primera vez)...")
+                _status("Preparando motor de interpolación (puede descargar la primera vez)...")
 
-            model = create_interpolation_model(providers=amd_hardware.providers, progress_cb=_status)
-            timesteps = timesteps_for_multiplier(multiplier)
-            _status(f"Modelo de interpolación listo — backend: {model.active_backend}")
+            model = RifeVulkanModel(progress_cb=_status)
 
             if "amf" in encoder and not FFmpegLocator.check_amf_support():
                 fallback_enc = "libx265" if "hevc" in encoder else "libx264"
                 logger.warning(f"AMD AMF no detectado. Conmutando a {fallback_enc}.")
                 encoder = fallback_enc
 
-            start_time = (resume_frame / fps) if (fps > 0 and resume_frame > 0) else 0.0
-            reader = FFmpegFrameReader(input_path, w, h, start_time=start_time)
-
-            prev_frame = reader.read_frame()
-            if prev_frame is None:
-                # Nothing left — either an empty video or resuming at/after
-                # the last frame. Treat whatever was accumulated as final.
-                reader.close()
-                reader = None
-                _consolidate(accumulated_ts, pending_segments, temp_dir)
-                if os.path.isfile(accumulated_ts):
-                    self._finalize(accumulated_ts, input_path, output_path, has_audio, _status)
-                shutil.rmtree(temp_dir, ignore_errors=True)
-                return True
-
-            frame_idx = resume_frame
-            segment_count = 0
-            segment_path = None
-
-            def open_segment():
-                nonlocal segment_path
-                segment_path = os.path.join(temp_dir, f"segment_{frame_idx:08d}.ts")
-                return FFmpegFrameWriter(
-                    output_path=segment_path,
-                    input_source_for_audio=input_path,
-                    width=w, height=h, fps=out_fps,
-                    has_audio=False,  # audio is muxed once at the final remux
-                    encoder=encoder, bitrate_mbps=bitrate_mbps,
-                    disable_bframes=True  # avoid PTS jumps where segments join, see media_pipeline.py
-                )
-
-            segment_writer = open_segment()
-            if resume_frame == 0:
-                segment_writer.write_frame(prev_frame)
-            # else: prev_frame is source frame `resume_frame`, already the
-            # last frame written by the previous run — it's only needed here
-            # as the pairing reference for the next interpolation, not to be
-            # written again (that would duplicate it in the output).
+            work_dir = os.path.join(temp_dir, "work")
 
             start_time_wall = time.time()
             last_fps_calc_time = start_time_wall
@@ -260,31 +317,53 @@ class InterpolationEngine:
                 if self._stop_requested:
                     break
 
-                next_frame = reader.read_frame()
-                if next_frame is None:
-                    break
+                is_first_segment = frame_idx == 0
+                extract_start_frame = frame_idx if is_first_segment else frame_idx - 1
+                extract_count = SEGMENT_SOURCE_FRAMES if is_first_segment else SEGMENT_SOURCE_FRAMES + 1
+                seek_time = extract_start_frame / fps if fps > 0 else 0.0
 
-                mids = model.interpolate(prev_frame, next_frame, timesteps)
-                for mid in mids:
-                    segment_writer.write_frame(mid)
-                segment_writer.write_frame(next_frame)
+                if os.path.isdir(work_dir):
+                    shutil.rmtree(work_dir, ignore_errors=True)
+                in_dir = os.path.join(work_dir, "in")
+                _extract_frames_png(input_path, seek_time, extract_count, in_dir)
 
-                if preview_callback:
-                    preview_callback(prev_frame, mids[len(mids) // 2] if mids else next_frame)
+                in_names = sorted(os.listdir(in_dir))
+                extracted = len(in_names)
+                new_source_frames = extracted - (0 if is_first_segment else 1)
+                if new_source_frames <= 0:
+                    shutil.rmtree(work_dir, ignore_errors=True)
+                    break  # reached the true end of the video
 
-                frame_idx += 1
-                segment_count += 1
-                prev_frame = next_frame
+                leading_ref = None if is_first_segment else os.path.join(in_dir, in_names[0])
 
-                if segment_count >= SEGMENT_SOURCE_FRAMES:
-                    segment_writer.close()
-                    pending_segments.append(segment_path)
-                    segment_count = 0
-                    if len(pending_segments) >= CONSOLIDATE_BATCH:
-                        _consolidate(accumulated_ts, pending_segments, temp_dir)
-                        pending_segments = []
-                    _save_progress(temp_dir, input_path, frame_idx, pending_segments)
-                    segment_writer = open_segment()
+                cur_dir = in_dir
+                for p in range(passes):
+                    next_dir = os.path.join(work_dir, f"pass{p}")
+                    model.run_2x_pass(cur_dir, next_dir)
+                    next_names = sorted(os.listdir(next_dir))
+                    _trim_trailing_duplicates_inplace(next_dir, next_names)  # see docstring: must happen before this feeds the next pass
+                    cur_dir = next_dir
+
+                out_names = sorted(os.listdir(cur_dir))
+                kept = _trim_leading_duplicates(cur_dir, out_names, leading_ref)
+
+                if preview_callback and kept:
+                    orig_img = _read_png_rgb(os.path.join(in_dir, in_names[0 if is_first_segment else 1]))
+                    mid_img = _read_png_rgb(os.path.join(cur_dir, kept[len(kept) // 2]))
+                    if orig_img is not None and mid_img is not None:
+                        preview_callback(orig_img, mid_img)
+
+                segment_path = os.path.join(temp_dir, f"segment_{frame_idx:08d}.ts")
+                start_number = int(os.path.splitext(kept[0])[0])
+                _encode_png_sequence(cur_dir, start_number, len(kept), out_fps, segment_path, encoder, bitrate_mbps)
+                shutil.rmtree(work_dir, ignore_errors=True)
+
+                frame_idx += new_source_frames
+                pending_segments.append(segment_path)
+                if len(pending_segments) >= CONSOLIDATE_BATCH:
+                    _consolidate(accumulated_ts, pending_segments, temp_dir)
+                    pending_segments = []
+                _save_progress(temp_dir, input_path, frame_idx, pending_segments)
 
                 now = time.time()
                 if now - last_fps_calc_time >= 1.0:
@@ -300,27 +379,15 @@ class InterpolationEngine:
                     eta_str = f"{hh:02d}:{m:02d}:{s:02d}"
 
                 if progress_callback:
-                    # No tiling here (full-frame RIFE, not memory-managed like
-                    # the other two engines) — "vram_used_pct" reuses system
-                    # RAM pressure as the same rough proxy MemoryManager uses
-                    # elsewhere, which matters here because a RAM-constrained
-                    # machine (not the GPU) is the realistic bottleneck for
-                    # this engine's full-frame (non-tiled) processing.
                     telemetry = {
-                        "vram_used_pct": int(psutil.virtual_memory().percent),
+                        "vram_used_pct": 0,  # no per-process VRAM API for the Vulkan binary
                         "tile_size": 0,
                         "device": amd_hardware.backend_name
                     }
                     progress_callback(frame_idx, total_frames, current_fps, eta_str, telemetry)
 
-            # Flush whatever is left in the current segment, checkpointed or not.
-            segment_writer.close()
-            if segment_count > 0:
-                pending_segments.append(segment_path)
-            segment_writer = None
-            reader.close()
-            reader = None
-            _save_progress(temp_dir, input_path, frame_idx, pending_segments)
+            if os.path.isdir(work_dir):
+                shutil.rmtree(work_dir, ignore_errors=True)
 
             if self._stop_requested:
                 _status("Interpolación cancelada — el progreso se guardó y se reanudará la próxima vez.")
@@ -337,10 +404,6 @@ class InterpolationEngine:
             logger.error(f"Error durante la interpolación de video: {e}", exc_info=True)
             raise e
         finally:
-            if segment_writer:
-                segment_writer.close()
-            if reader:
-                reader.close()
             self.is_running = False
 
     @staticmethod
