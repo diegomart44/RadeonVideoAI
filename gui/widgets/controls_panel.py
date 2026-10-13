@@ -262,6 +262,15 @@ class ControlsPanel(QWidget):
             ("95% VRAM — Agresivo", "Exprime al máximo la memoria disponible."),
         ])
         lay_vram.addWidget(self.cmb_vram_limit)
+
+        self.chk_live_preview = QCheckBox("Vista previa en vivo")
+        self.chk_live_preview.setChecked(True)
+        self.chk_live_preview.setToolTip(
+            "Si se desactiva, el procesamiento deja de copiar y enviar cada fotograma "
+            "al visor antes/después, ganando velocidad extra de reescalado."
+        )
+        lay_vram.addWidget(self.chk_live_preview)
+
         layout.addWidget(grp_vram)
 
         grp_enc = QGroupBox("🎬  Codificación (AMD AMF)")
@@ -610,7 +619,8 @@ class ControlsPanel(QWidget):
             "encoder": encoder,
             "bitrate_mbps": self.spn_bitrate.value(),
             "vram_safety": 0.90,
-            "has_audio": self.chk_audio.isChecked()
+            "has_audio": self.chk_audio.isChecked(),
+            "live_preview": self.chk_live_preview.isChecked()
         }
 
         self.btn_start.setEnabled(False)

@@ -104,7 +104,7 @@ class ProcessingWorker(QObject):
                 bitrate_mbps=self.config["bitrate_mbps"],
                 vram_safety=self.config["vram_safety"],
                 progress_callback=self._on_progress,
-                preview_callback=self._on_preview,
+                preview_callback=self._on_preview if self.config.get("live_preview", True) else None,
                 status_callback=self._on_status
             )
             self.finished_signal.emit(success, "Procesamiento completado con éxito." if success else "Procesamiento cancelado por el usuario.")
