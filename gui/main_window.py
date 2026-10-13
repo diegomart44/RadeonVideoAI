@@ -2,14 +2,16 @@
 Main Application Window for RadeonVideoAI Desktop Suite.
 Connects UI controls, real-time side-by-side viewport, and async processing worker.
 
-NOTE: the three engine classes (VideoProcessingEngine, GenerativeVideoEngine,
-InterpolationEngine) are imported lazily, inside each worker's __init__,
-rather than at module level. VideoProcessingEngine/GenerativeVideoEngine
-pull in PyTorch, which is a large resident-memory cost on its own — on a
-16GB-RAM machine that matters even before any AI job starts, since just
-launching the app would otherwise load PyTorch whether or not the user ever
-touches those tabs. A user who only ever uses "Interpolar" (which needs
-nothing but ONNX Runtime) now never pays that cost.
+NOTE: the four engine classes (VideoProcessingEngine, GenerativeVideoEngine,
+InterpolationEngine, AudioRestorationEngine) are imported lazily, inside
+each worker's __init__, rather than at module level. VideoProcessingEngine/
+GenerativeVideoEngine pull in PyTorch, which is a large resident-memory cost
+on its own — on a 16GB-RAM machine that matters even before any AI job
+starts, since just launching the app would otherwise load PyTorch whether
+or not the user ever touches those tabs. AudioRestorationEngine pulls in
+voicefixer (librosa, numba/llvmlite JIT, etc.) for the same reason. A user
+who only ever uses "Interpolar" (which needs nothing but ONNX Runtime) now
+never pays either cost.
 """
 
 import os
@@ -254,6 +256,58 @@ class InterpolationProcessingWorker(QObject):
         self.engine.cancel()
 
 
+class AudioProcessingWorker(QObject):
+    """
+    Asynchronous worker for the AI audio restoration engine (VoiceFixer).
+    Its own class, mirroring the other workers' separation. Unlike them,
+    it has no preview_signal: this pipeline never touches a video frame
+    (CPU-only, no ONNX Runtime/DirectML at all), so there's no per-frame
+    before/after image to show — only a per-chunk progress tick.
+    """
+
+    progress_signal = pyqtSignal(int, int, float, str, dict)
+    finished_signal = pyqtSignal(bool, str)
+    status_signal = pyqtSignal(str)
+
+    def __init__(self, config: dict):
+        super().__init__()
+        from core.audio_engine import AudioRestorationEngine
+        self.config = config
+        self.engine = AudioRestorationEngine()
+
+    def start(self):
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self):
+        try:
+            success = self.engine.process_audio(
+                input_path=self.config["input_path"],
+                output_path=self.config["output_path"],
+                mode=self.config.get("mode", 0),
+                audio_bitrate_kbps=self.config.get("audio_bitrate_kbps", 192),
+                progress_callback=self._on_progress,
+                status_callback=self._on_status
+            )
+            self.finished_signal.emit(success, "Restauración de audio completada con éxito." if success else "Restauración de audio cancelada por el usuario.")
+        except Exception as e:
+            self.finished_signal.emit(False, f"Error en el motor de audio: {str(e)}")
+
+    def _on_progress(self, curr, total, rate, eta, telemetry):
+        self.progress_signal.emit(curr, total, rate, eta, telemetry)
+
+    def _on_status(self, message: str):
+        self.status_signal.emit(message)
+
+    def pause(self):
+        self.engine.pause()
+
+    def resume(self):
+        self.engine.resume()
+
+    def cancel(self):
+        self.engine.cancel()
+
+
 class MainWindow(QMainWindow):
     """Main window integrating the Topaz-style interface, live preview, and pipeline."""
 
@@ -268,6 +322,7 @@ class MainWindow(QMainWindow):
         self.worker = None
         self.gen_worker = None
         self.interp_worker = None
+        self.audio_worker = None
 
         self._build_ui()
 
@@ -329,6 +384,10 @@ class MainWindow(QMainWindow):
         self.controls.interpolate_pause_requested.connect(self._pause_interpolation)
         self.controls.interpolate_resume_requested.connect(self._resume_interpolation)
         self.controls.interpolate_cancel_requested.connect(self._cancel_interpolation)
+        self.controls.audio_requested.connect(self._start_audio_restoration)
+        self.controls.audio_pause_requested.connect(self._pause_audio_restoration)
+        self.controls.audio_resume_requested.connect(self._resume_audio_restoration)
+        self.controls.audio_cancel_requested.connect(self._cancel_audio_restoration)
         self.controls.file_selected.connect(self._on_file_selected)
         splitter.addWidget(self.controls)
 
@@ -493,4 +552,48 @@ class MainWindow(QMainWindow):
                 subprocess.run(f'explorer /select,"{os.path.abspath(out_file)}"', shell=True)
         else:
             QMessageBox.information(self, "Interpolación en pausa", message)
+
+    # =====================================================================
+    # Mejorar Audio (VoiceFixer) — fully independent flow, own worker/engine
+    # =====================================================================
+    def _start_audio_restoration(self, config: dict):
+        self.status_bar.reset_telemetry()
+        self.viewport.set_processing_state(True, "Preparando restauración de audio...")
+        self.audio_worker = AudioProcessingWorker(config)
+        self.audio_worker.progress_signal.connect(self.status_bar.update_telemetry)
+        self.audio_worker.progress_signal.connect(self._on_audio_viewport_progress)
+        self.audio_worker.finished_signal.connect(self._on_audio_finished)
+        self.audio_worker.status_signal.connect(self.status_bar.set_status)
+        self.audio_worker.start()
+
+    def _on_audio_viewport_progress(self, curr, total, rate, eta, telemetry):
+        text = f"Restaurando audio: segmento {curr} / {total} · ETA {eta}"
+        self.viewport.set_processing_state(True, text)
+
+    def _pause_audio_restoration(self):
+        if self.audio_worker:
+            self.audio_worker.pause()
+
+    def _resume_audio_restoration(self):
+        if self.audio_worker:
+            self.audio_worker.resume()
+
+    def _cancel_audio_restoration(self):
+        if self.audio_worker:
+            self.audio_worker.cancel()
+
+    def _on_audio_finished(self, success: bool, message: str):
+        self.controls.set_audio_finished()
+        self.viewport.set_processing_state(False)
+        if success:
+            out_file = self.controls.txt_audio_output.text().strip()
+            reply = QMessageBox.information(
+                self, "Restauración de Audio Finalizada",
+                f"{message}\n\n¿Deseas abrir la carpeta con el resultado?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes and os.path.isfile(out_file):
+                subprocess.run(f'explorer /select,"{os.path.abspath(out_file)}"', shell=True)
+        else:
+            QMessageBox.warning(self, "Aviso de Restauración de Audio", message)
 

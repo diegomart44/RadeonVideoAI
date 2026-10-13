@@ -41,6 +41,17 @@ datas += collect_data_files('accelerate')
 datas += collect_data_files('tokenizers')
 datas += collect_data_files('huggingface_hub')
 
+# Mejorar Audio tab (VoiceFixer): its import chain reaches scipy.signal/
+# scipy.io (voicefixer's vocoder) and matplotlib (librosa.display, imported
+# at voicefixer/base.py's module top level) even though nothing in this
+# app's own code calls either directly — both used to be in `excludes`
+# below from before this tab existed, which silently meant the frozen exe
+# had no scipy at all; the Audio tab would hit ModuleNotFoundError the
+# instant someone clicked Start.
+datas += collect_data_files('matplotlib')
+datas += collect_data_files('librosa')
+datas += collect_data_files('voicefixer')
+
 # 2. Binaries: Include local ffmpeg and ffprobe if present
 binaries = []
 for binary_name in ["ffmpeg.exe", "ffprobe.exe"]:
@@ -52,6 +63,10 @@ binaries += collect_dynamic_libs('torch')
 binaries += collect_dynamic_libs('onnxruntime')
 binaries += collect_dynamic_libs('tokenizers')
 binaries += collect_dynamic_libs('safetensors')
+binaries += collect_dynamic_libs('scipy')
+binaries += collect_dynamic_libs('numba')
+binaries += collect_dynamic_libs('llvmlite')
+binaries += collect_dynamic_libs('soundfile')
 
 # 3. Hidden imports to prevent runtime missing module errors
 hiddenimports = [
@@ -84,12 +99,24 @@ hiddenimports = [
     'huggingface_hub',
     'safetensors',
     'tokenizers',
+    # Mejorar Audio tab
+    'voicefixer',
+    'librosa',
+    'soundfile',
+    'scipy',
+    'scipy.signal',
+    'scipy.io',
 ]
 hiddenimports += collect_submodules('torch')
 hiddenimports += collect_submodules('onnxruntime')
 hiddenimports += collect_submodules('optimum')
 hiddenimports += collect_submodules('diffusers')
 hiddenimports += collect_submodules('accelerate')
+hiddenimports += collect_submodules('voicefixer')
+hiddenimports += collect_submodules('librosa')
+hiddenimports += collect_submodules('scipy')
+hiddenimports += collect_submodules('numba')
+hiddenimports += collect_submodules('torchlibrosa')
 
 a = Analysis(
     ['main.py'],
@@ -100,7 +127,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['tkinter', 'matplotlib', 'scipy', 'scapy', 'IPython', 'notebook'],
+    excludes=['tkinter', 'scapy', 'IPython', 'notebook'],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,

@@ -15,6 +15,10 @@ because they are two unrelated AI pipelines:
   (core/interpolation_engine.py + core/interpolation_models.py). Raises
   frame rate (x2/x4) without touching resolution or per-frame detail;
   resumable via on-disk checkpoints if interrupted.
+- "🔊 Mejorar Audio": VoiceFixer speech restoration (noise, reverberation,
+  low resolution, clipping) (core/audio_engine.py + core/audio_models.py).
+  Works on the audio track only — the video stream (if any) is never
+  re-encoded; runs on CPU, unrelated to the other three tabs' GPU path.
 
 Keeping them as separate tabs with separate buttons (rather than one shared
 flow) was an explicit requirement — the features must not be able to break
@@ -52,6 +56,12 @@ class ControlsPanel(QWidget):
     interpolate_resume_requested = pyqtSignal()
     interpolate_cancel_requested = pyqtSignal()
 
+    # Mejorar Audio (VoiceFixer: ruido, reverberación, baja resolución, clipping)
+    audio_requested = pyqtSignal(dict)
+    audio_pause_requested = pyqtSignal()
+    audio_resume_requested = pyqtSignal()
+    audio_cancel_requested = pyqtSignal()
+
     # Fired whenever ANY tab's input file changes, so the viewer can show
     # the first frame right away regardless of which pipeline gets used.
     file_selected = pyqtSignal(str)
@@ -64,6 +74,7 @@ class ControlsPanel(QWidget):
         self._is_paused = False
         self._is_gen_paused = False
         self._is_interp_paused = False
+        self._is_audio_paused = False
         self._interp_source_meta = None
 
         self._build_ui()
@@ -146,6 +157,7 @@ class ControlsPanel(QWidget):
         self.tabs.addTab(self._build_rescale_tab(), "🔍  Reescalar con IA")
         self.tabs.addTab(self._build_generate_tab(), "🌌  Generar (IA Generativa)")
         self.tabs.addTab(self._build_interpolate_tab(), "🎞️  Interpolar (FPS)")
+        self.tabs.addTab(self._build_audio_tab(), "🔊  Mejorar Audio")
         main_layout.addWidget(self.tabs, stretch=1)
 
     # =====================================================================
@@ -540,13 +552,16 @@ class ControlsPanel(QWidget):
 
     def set_active_tab_input_path(self, path: str):
         """Routes a dropped/selected file to whichever tab is currently
-        showing (0 = Reescalar, 1 = Generar, 2 = Interpolar), so drag-and-drop
-        feels consistent with whichever pipeline the user is currently looking at."""
+        showing (0 = Reescalar, 1 = Generar, 2 = Interpolar, 3 = Mejorar
+        Audio), so drag-and-drop feels consistent with whichever pipeline
+        the user is currently looking at."""
         idx = self.tabs.currentIndex()
         if idx == 1:
             self.set_gen_input_path(path)
         elif idx == 2:
             self.set_interp_input_path(path)
+        elif idx == 3:
+            self.set_audio_input_path(path)
         else:
             self.set_input_path(path)
 
@@ -823,3 +838,157 @@ class ControlsPanel(QWidget):
         self.btn_interp_cancel.setEnabled(False)
         self.btn_interp_pause.setText("⏸  Pausar")
         self._is_interp_paused = False
+
+    # =====================================================================
+    # Tab 4: Mejorar Audio (VoiceFixer speech restoration)
+    # =====================================================================
+    def _build_audio_tab(self) -> QWidget:
+        outer = QWidget()
+        outer_lay = QVBoxLayout(outer)
+        outer_lay.setContentsMargins(0, 0, 0, 0)
+        outer_lay.setSpacing(14)
+
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(14)
+
+        grp_files = QGroupBox("📁  Video o Audio a Restaurar")
+        lay_files = QVBoxLayout(grp_files)
+        lay_files.setSpacing(6)
+
+        lay_files.addWidget(self._section_label("Archivo original"))
+        h_in = QHBoxLayout()
+        self.txt_audio_input = QLineEdit()
+        self.txt_audio_input.setPlaceholderText("Seleccionar archivo...")
+        btn_in = QPushButton("Examinar")
+        btn_in.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_in.clicked.connect(self._browse_audio_input)
+        h_in.addWidget(self.txt_audio_input)
+        h_in.addWidget(btn_in)
+        lay_files.addLayout(h_in)
+
+        lay_files.addWidget(self._section_label("Resultado (destino)"))
+        h_out = QHBoxLayout()
+        self.txt_audio_output = QLineEdit()
+        self.txt_audio_output.setPlaceholderText("Ruta de salida generada...")
+        btn_out = QPushButton("Guardar")
+        btn_out.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_out.clicked.connect(self._browse_audio_output)
+        h_out.addWidget(self.txt_audio_output)
+        h_out.addWidget(btn_out)
+        lay_files.addLayout(h_out)
+        layout.addWidget(grp_files)
+
+        grp_audio = QGroupBox("🔊  Restauración de Audio")
+        lay_audio = QVBoxLayout(grp_audio)
+        lay_audio.setSpacing(6)
+
+        notice = QLabel(
+            "Restaura la voz/diálogo con IA (VoiceFixer): reduce ruido de "
+            "fondo, reverberación/eco, graves de baja resolución y clipping, "
+            "todo en un solo modelo. Optimizado para voz — en música puede "
+            "introducir artefactos. Si el archivo es un video, la imagen no "
+            "se re-codifica, solo se reemplaza su pista de audio. Corre en "
+            "CPU: no usa la GPU ni tiene relación con las otras pestañas."
+        )
+        notice.setObjectName("FieldLabel")
+        notice.setWordWrap(True)
+        lay_audio.addWidget(notice)
+
+        lay_audio.addWidget(self._section_label("Modo de restauración"))
+        self.cmb_audio_mode = self._combo([
+            ("Automático — Recomendado", "Funciona bien para la mayoría de los casos de degradación moderada."),
+            ("Agresivo — Audio muy dañado", "Más efectivo en audio seriamente dañado; puede sonar menos natural en audio ya limpio."),
+        ])
+        lay_audio.addWidget(self.cmb_audio_mode)
+
+        lay_audio.addWidget(self._section_label("Calidad de audio de salida"))
+        self.cmb_audio_bitrate = self._combo([
+            ("192 kbps — Recomendado", "Buen balance entre calidad y tamaño de archivo."),
+            ("128 kbps", "Menor tamaño de archivo."),
+            ("256 kbps", "Mayor calidad."),
+            ("320 kbps — Máxima", "Máxima calidad disponible en AAC."),
+        ])
+        lay_audio.addWidget(self.cmb_audio_bitrate)
+        layout.addWidget(grp_audio)
+
+        layout.addStretch(1)
+        outer_lay.addWidget(self._scroll_wrap(container), stretch=1)
+
+        row, self.btn_audio_start, self.btn_audio_pause, self.btn_audio_cancel = self._action_row(
+            "🔊  MEJORAR AUDIO",
+            "Restaura ruido, reverberación, baja resolución y clipping en la voz/diálogo del audio (VoiceFixer, CPU).",
+            self._on_audio_start_clicked, self._on_audio_pause_clicked, self._on_audio_cancel_clicked
+        )
+        outer_lay.addWidget(row)
+        return outer
+
+    def set_audio_input_path(self, path: str):
+        self.txt_audio_input.setText(path)
+        base, ext = os.path.splitext(path)
+        # Video inputs keep their container so -c:v copy has a matching
+        # extension; pure-audio inputs default to WAV since the restored
+        # track is generated internally as 16-bit PCM.
+        out_ext = ext if ext.lower() in (".mp4", ".mkv", ".mov", ".avi", ".webm", ".ts") else ".wav"
+        self.txt_audio_output.setText(f"{base}_Audio_Restaurado{out_ext}")
+        self.file_selected.emit(path)
+
+    def _browse_audio_input(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Seleccionar Video o Audio", "",
+            "Video o Audio (*.mp4 *.mkv *.mov *.avi *.webm *.ts *.wav *.mp3 *.flac *.m4a *.aac);;Todos los Archivos (*.*)"
+        )
+        if path:
+            self.set_audio_input_path(path)
+
+    def _browse_audio_output(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Guardar Resultado", self.txt_audio_output.text() or "",
+            "Video MP4 (*.mp4);;Video MKV (*.mkv);;Audio WAV (*.wav);;Audio MP3 (*.mp3);;Todos los Archivos (*.*)"
+        )
+        if path:
+            self.txt_audio_output.setText(path)
+
+    def _on_audio_start_clicked(self):
+        in_p = self.txt_audio_input.text().strip()
+        out_p = self.txt_audio_output.text().strip()
+        if not in_p or not os.path.isfile(in_p):
+            return
+
+        mode = 0 if self.cmb_audio_mode.currentIndex() == 0 else 2
+
+        bitrate_str = "".join(ch for ch in self.cmb_audio_bitrate.currentText().split(" ")[0] if ch.isdigit())
+        audio_bitrate_kbps = int(bitrate_str) if bitrate_str.isdigit() else 192
+
+        config = {
+            "input_path": in_p,
+            "output_path": out_p,
+            "mode": mode,
+            "audio_bitrate_kbps": audio_bitrate_kbps,
+        }
+
+        self.btn_audio_start.setEnabled(False)
+        self.btn_audio_pause.setEnabled(True)
+        self.btn_audio_cancel.setEnabled(True)
+        self.audio_requested.emit(config)
+
+    def _on_audio_pause_clicked(self):
+        if not self._is_audio_paused:
+            self._is_audio_paused = True
+            self.btn_audio_pause.setText("▶  Reanudar")
+            self.audio_pause_requested.emit()
+        else:
+            self._is_audio_paused = False
+            self.btn_audio_pause.setText("⏸  Pausar")
+            self.audio_resume_requested.emit()
+
+    def _on_audio_cancel_clicked(self):
+        self.audio_cancel_requested.emit()
+
+    def set_audio_finished(self):
+        self.btn_audio_start.setEnabled(True)
+        self.btn_audio_pause.setEnabled(False)
+        self.btn_audio_cancel.setEnabled(False)
+        self.btn_audio_pause.setText("⏸  Pausar")
+        self._is_audio_paused = False

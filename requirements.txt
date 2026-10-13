@@ -14,3 +14,7 @@ accelerate>=1.15
 pillow>=12.0
 huggingface_hub>=0.36
 safetensors>=0.8
+
+# Mejorar Audio tab (VoiceFixer: speech restoration — noise, reverberation,
+# low resolution, clipping). CPU-only, no DirectML/ONNX involved.
+voicefixer>=0.1.3

@@ -175,6 +175,34 @@ tocar la resolución ni tener relación con las otras dos pestañas:
 - El audio original se preserva sin tocar (la interpolación no cambia la
   duración real del video, solo agrega fotogramas dentro del mismo tiempo).
 
+## Pestaña "Mejorar Audio" — restauración de voz con IA
+
+Una cuarta pestaña, completamente independiente y la única que **no** usa
+la GPU (`core/audio_engine.py` + `core/audio_models.py`): restaura la
+pista de audio de un vídeo o un archivo de audio suelto con
+[VoiceFixer](https://github.com/haoheliu/voicefixer) (licencia MIT), un
+modelo entrenado para arreglar voz/diálogo degradada por ruido de fondo,
+reverberación/eco, baja resolución (ancho de banda limitado) y clipping —
+las cuatro en un solo modelo.
+
+- **Solo toca el audio**: si el archivo de entrada es un vídeo, la imagen
+  se copia sin re-codificar (`-c:v copy`); únicamente se reemplaza la
+  pista de audio por la restaurada.
+- **Pensado para voz, no para música**: en contenido musical puede meter
+  artefactos, porque el modelo no fue entrenado para eso — es consistente
+  con lo que documenta el propio VoiceFixer.
+- **CPU únicamente**: VoiceFixer es PyTorch puro sin exportación a ONNX
+  disponible, así que no corre por DirectML como las otras pestañas.
+  Medido en el equipo de desarrollo a ~1.4x tiempo real por segmento de
+  30s — no es tiempo real, pero es razonable para una herramienta de
+  procesamiento por lotes sin conexión.
+- Descarga ~600MB de pesos pre-entrenados la primera vez que se usa
+  (`~/.cache/voicefixer/`, fuera de la carpeta del proyecto).
+- Resumible solo a nivel de segmento: pausar/cancelar responde en el
+  siguiente corte de ~30s, no al instante (restaurar un segmento en CPU
+  toma decenas de segundos y VoiceFixer no expone un punto de corte más
+  fino dentro de esa llamada).
+
 ## Requisitos
 
 - Windows 10/11 64-bit.
@@ -212,10 +240,11 @@ Python).
 
 ## Uso
 
-La app tiene tres pestañas totalmente independientes — "Reescalar con IA",
-"Generar" e "Interpolar (FPS)" (ver arriba) — cada una con su propio
-selector de vídeo y botones de Iniciar/Pausar/Cancelar. Arrastrar un archivo
-a la ventana lo carga en la pestaña que esté activa en ese momento.
+La app tiene cuatro pestañas totalmente independientes — "Reescalar con IA",
+"Generar", "Interpolar (FPS)" y "Mejorar Audio" (ver arriba) — cada una con
+su propio selector de archivo y botones de Iniciar/Pausar/Cancelar.
+Arrastrar un archivo a la ventana lo carga en la pestaña que esté activa en
+ese momento.
 
 1. Arrastra un vídeo a la ventana (o usa "Examinar...").
 2. Elige factor de reescalado (1x restauración / 2x / 4x) y modelo de IA —
@@ -248,9 +277,9 @@ tipo de contenido (ver tabla arriba).
 python -m unittest discover -s tests
 ```
 
-`test_03_ai_model_forward` y `test_e2e.py` requieren red la primera vez
-(descargan los pesos oficiales); si no hay conexión, el primero se omite
-automáticamente.
+`test_03_ai_model_forward`, `test_e2e.py` y `test_audio_e2e.py` requieren
+red la primera vez (descargan los pesos oficiales); si no hay conexión, se
+omiten automáticamente.
 
 ## Licencias de los modelos
 
@@ -269,3 +298,6 @@ por su autor (nihui); ver
 https://github.com/nihui/rife-ncnn-vulkan/blob/master/LICENSE. El paquete
 reducido que descarga esta app (solo el ejecutable + modelo v4.6, en vez
 del release oficial completo de ~430MB) incluye esa misma licencia.
+
+VoiceFixer (pestaña "Mejorar Audio") se distribuye bajo licencia MIT por su
+autor (Haohe Liu); ver https://github.com/haoheliu/voicefixer/blob/main/LICENSE.
