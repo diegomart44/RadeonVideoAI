@@ -4,6 +4,19 @@ Entrypoint script.
 """
 
 import os
+
+# Must be set before torch's first import anywhere in the process (which
+# happens lazily, inside whichever tab's worker runs first). VoiceFixer's
+# vocoder uses @torch.jit.script on a couple of free functions; TorchScript
+# compiles those by reading their *source text* via inspect.getsource(),
+# which only exists in a dev checkout — a PyInstaller build ships compiled
+# .pyc inside the PYZ archive, no .py files, so that compilation step fails
+# at runtime with "Can't get source for <function ...>". The app doesn't
+# need JIT-compiled speed (this is already CPU-only, non-real-time
+# inference), so disabling it globally via this official PyTorch escape
+# hatch makes @torch.jit.script a no-op passthrough instead of erroring.
+os.environ.setdefault("PYTORCH_JIT", "0")
+
 import sys
 import logging
 import traceback
